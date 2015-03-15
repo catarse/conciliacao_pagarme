@@ -27,6 +27,8 @@ executable conciliacao-pagarme
                        , containers
                        , HDBC
                        , HDBC-postgresql
+                       , scientific
+                       , aeson
 
   hs-source-dirs:      src
   default-language:    Haskell2010

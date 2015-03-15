@@ -4,15 +4,20 @@ module Main where
 
 import Network.Pagarme
 import Network.Wreq
-import Control.Monad
 import qualified Data.Map as M
 
-import Control.Exception
 import Database.HDBC 
 import Database.HDBC.PostgreSQL
 
+import Data.Scientific
+import Data.Aeson
+
 usingKey :: Options -> Options
 usingKey = withApiKey "API KEY"
+
+jsonToSql :: Value -> SqlValue
+jsonToSql value = (toSql . show . coefficient) number
+  where Number number = value
 
 getConfirmedTransactionsPage :: Int -> IO [JSONMap]
 getConfirmedTransactionsPage page = do
@@ -29,13 +34,14 @@ verifyTransactionsWith verifyFunction page = do
 
 main :: IO ()
 main = do
-  c <- connectPostgreSQL "host=localhost dbname=postgres user=postgres password=pass"
-  select <- prepare c "SELECT * FROM version();"
+  con <- connectPostgreSQL "host=localhost dbname=catarse_development port=5432 user=postgres password=pass"
+  select <- prepare con "SELECT * FROM contributions WHERE payment_id = ?;"
   let 
     verifyInDB transaction = do
-                 execute select []
-                 result <- fetchAllRows select
+                 _ <- execute select [jsonToSql (transaction M.! "id")]
+                 result <- fetchRowMap select
                  print result
                  putStrLn $ "Transaction " ++ show (transaction M.! "id") ++ " verified"
     verifyTransactions = verifyTransactionsWith verifyInDB
   verifyTransactions 1
+  disconnect con
