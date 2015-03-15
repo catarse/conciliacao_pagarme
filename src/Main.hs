@@ -4,7 +4,7 @@ module Main where
 
 import Network.Pagarme
 import Network.Wreq
-import qualified Data.Map as M
+import Data.Map
 
 import Database.HDBC 
 import Database.HDBC.PostgreSQL
@@ -13,7 +13,7 @@ import Data.Scientific
 import Data.Aeson
 
 usingKey :: Options -> Options
-usingKey = withApiKey "API KEY"
+usingKey = withApiKey ""
 
 jsonToSql :: Value -> SqlValue
 jsonToSql value = (toSql . show . coefficient) number
@@ -34,14 +34,14 @@ verifyTransactionsWith verifyFunction page = do
 
 main :: IO ()
 main = do
-  con <- connectPostgreSQL "host=localhost dbname=catarse_development port=5432 user=postgres password=pass"
+  con <- connectPostgreSQL ""
   select <- prepare con "SELECT * FROM contributions WHERE payment_id = ?;"
   let 
     verifyInDB transaction = do
-                 _ <- execute select [jsonToSql (transaction M.! "id")]
+                 _ <- execute select [jsonToSql (transaction ! "id")]
                  result <- fetchRowMap select
                  print result
-                 putStrLn $ "Transaction " ++ show (transaction M.! "id") ++ " verified"
+                 putStrLn $ "Transaction " ++ show (transaction ! "id") ++ " verified"
     verifyTransactions = verifyTransactionsWith verifyInDB
   verifyTransactions 1
   disconnect con
