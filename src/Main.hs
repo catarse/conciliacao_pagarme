@@ -19,7 +19,10 @@ usingKey :: Options -> Options
 usingKey = withApiKey ""
 
 jsonToSql :: Value -> SqlValue
-jsonToSql value = (toSql . show . coefficient) number
+jsonToSql = toSql . jsonToString
+
+jsonToString :: Value -> String
+jsonToString value = (show . coefficient) number
   where Number number = value
 
 getConfirmedTransactionsPage :: Int -> IO [Object]
@@ -37,8 +40,8 @@ verifyTransactionsWith verifyFunction page = do
 
 shouldUpdateDb transaction Nothing = pagarmeState /= "waiting_payment"
   where String pagarmeState = transaction ! "status"
-shouldUpdateDb transaction (Just dbRecord) = (dbState == "confirmed" && pagarmeState /= "paid") 
-                                             || ((dbState == "refunded" || dbState == "requested_refund") && pagarmeState /= "refunded")
+shouldUpdateDb transaction (Just dbRecord) = (dbState /= "confirmed" && pagarmeState == "paid") 
+                                             || (dbState /= "refunded" && dbState /= "requested_refund" && pagarmeState == "refunded")
   where SqlByteString dbState = dbRecord M.! "state"
         String pagarmeState = transaction ! "status"
 
@@ -50,9 +53,9 @@ main = do
   selectByCustomer <- prepare con "SELECT * FROM contributions WHERE value::int = ? AND payer_email = ?;"
 
   let 
-    returnHint transaction id = return (show id, (show . coefficient) paymentId, show pagarmeState)
+    returnHint transaction id = return (show id, paymentId, show pagarmeState)
       where String pagarmeState = transaction ! "status"
-            Number paymentId = transaction ! "id"
+            paymentId = jsonToString $ transaction ! "id"
 
     findUpdateHintWithMetadata key transaction = do
       _ <- execute selectByKey [toSql key]
@@ -81,9 +84,9 @@ main = do
                                                               in findUpdateHintWithMetadata key transaction
                                                         else findUpdateHintWithCustomer transaction
                                             else findUpdateHintWithCustomer transaction
-    findUpdateHint transaction (Just dbRecord) = return (show id, show paymentId, show pagarmeState)
+    findUpdateHint transaction (Just dbRecord) = return (show id, paymentId, show pagarmeState)
       where String pagarmeState = transaction ! "status"
-            String paymentId = transaction ! "id"
+            paymentId = jsonToString $ transaction ! "id"
             SqlInteger id = dbRecord M.! "id"
 
     insertUpdateHint :: Object -> Maybe DbResult -> IO ()
