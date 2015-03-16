@@ -24,6 +24,7 @@ executable conciliacao-pagarme
                        , pagarme
                        , wreq
                        , mtl
+                       , unordered-containers
                        , containers
                        , HDBC
                        , HDBC-postgresql
