@@ -8,10 +8,12 @@ import Data.HashMap.Strict ((!), member)
 import qualified Data.Map as M
 
 import Database.HDBC 
+import Database.HDBC.SqlValue
 import Database.HDBC.PostgreSQL
 
 import Data.Scientific
 import Data.Aeson
+import Data.Text (unpack)
 
 type DbResult = M.Map String SqlValue
 
@@ -38,11 +40,16 @@ verifyTransactionsWith verifyFunction page = do
        []   -> putStrLn "Finish verification"
        _ -> verifyTransactionsWith verifyFunction (page + 1)
 
+equivalentPagarmeState :: String -> String
+equivalentPagarmeState dbState 
+  | dbState == "confirmed" || dbState == "requested_refund" = "paid" 
+  | dbState == "refunded" || dbState == "refunded_and_canceled" = "refunded" 
+  | otherwise = "waiting_payment"
+
 shouldUpdateDb transaction Nothing = pagarmeState /= "waiting_payment"
   where String pagarmeState = transaction ! "status"
-shouldUpdateDb transaction (Just dbRecord) = (dbState /= "confirmed" && pagarmeState == "paid") 
-                                             || (dbState /= "refunded" && dbState /= "requested_refund" && pagarmeState == "refunded")
-  where SqlByteString dbState = dbRecord M.! "state"
+shouldUpdateDb transaction (Just dbRecord) = unpack pagarmeState /= equivalentPagarmeState dbState
+  where dbState = fromSql $ dbRecord M.! "state" :: String
         String pagarmeState = transaction ! "status"
 
 main :: IO ()
@@ -53,46 +60,55 @@ main = do
   selectByCustomer <- prepare con "SELECT * FROM contributions WHERE value::int = ? AND payer_email = ?;"
 
   let 
-    returnHint transaction id = return (show id, paymentId, show pagarmeState)
+    valueToSql transaction = nToSql v
+      where
+        Number value = transaction ! "amount"
+        v = coefficient $ value / 100
+
+    emailToSql transaction = toSql email
+      where
+        Object customer = transaction ! "customer"
+        String email = customer ! "email"
+
+    keyToSql transaction = if member "metadata" transaction
+                              then let Object metadata = transaction ! "metadata" :: Value
+                                    in if member "key" metadata
+                                          then let String key =  (metadata ! "key")
+                                                in toSql key
+                                          else SqlNull
+                              else SqlNull
+
+    returnHint transaction id = return (id, toSql paymentId, toSql (unpack pagarmeState), keyToSql transaction, valueToSql transaction, emailToSql transaction)
       where String pagarmeState = transaction ! "status"
             paymentId = jsonToString $ transaction ! "id"
 
     findUpdateHintWithMetadata key transaction = do
-      _ <- execute selectByKey [toSql key]
+      _ <- execute selectByKey [key]
       result <- fetchRowMap selectByKey
       case result of
-           Just record -> putStrLn "Found by key!!!" >> returnHint transaction (record M.! "id")
-           Nothing -> putStrLn ("Missing key " ++ show key) >> findUpdateHintWithCustomer transaction
+           Just record -> putStrLn "Found!!!" >> returnHint transaction (record M.! "id")
+           Nothing -> findUpdateHintWithCustomer transaction
       
 
     findUpdateHintWithCustomer transaction = do 
-      let Number value = transaction ! "amount"
-          v = coefficient $ value / 100
-          Object customer = transaction ! "customer"
-          String email = customer ! "email"
-      _ <- execute selectByCustomer [nToSql v, toSql email]
+      _ <- execute selectByCustomer [valueToSql transaction, emailToSql transaction]
       result <- fetchRowMap selectByCustomer
       case result of
-           Just record -> putStrLn "Found by customer!!!" >> returnHint transaction (record M.! "id")
-           Nothing -> putStrLn ("Missing key " ++ show email ++ " value " ++ show v) >> returnHint transaction "Missgin key"
+           Just record -> putStrLn "Found!!!" >> returnHint transaction (record M.! "id")
+           Nothing -> returnHint transaction SqlNull
 
-    findUpdateHint :: Object -> Maybe DbResult -> IO (String, String, String)
-    findUpdateHint transaction Nothing = if member "metadata" transaction
-                                            then let Object metadata = transaction ! "metadata" :: Value
-                                                  in if member "key" metadata
-                                                        then let String key =  (metadata ! "key")
-                                                              in findUpdateHintWithMetadata key transaction
-                                                        else findUpdateHintWithCustomer transaction
-                                            else findUpdateHintWithCustomer transaction
-    findUpdateHint transaction (Just dbRecord) = return (show id, paymentId, show pagarmeState)
-      where String pagarmeState = transaction ! "status"
-            paymentId = jsonToString $ transaction ! "id"
-            SqlInteger id = dbRecord M.! "id"
+    findUpdateHint :: Object -> Maybe DbResult -> IO (SqlValue, SqlValue, SqlValue, SqlValue, SqlValue, SqlValue)
+    findUpdateHint transaction Nothing = if key == SqlNull
+                                            then findUpdateHintWithCustomer transaction
+                                            else findUpdateHintWithMetadata key transaction
+                                              where key = keyToSql transaction
+    findUpdateHint transaction (Just dbRecord) = returnHint transaction (dbRecord M.! "id")
 
     insertUpdateHint :: Object -> Maybe DbResult -> IO ()
     insertUpdateHint transaction dbRecord = do
-      (contributionId, paymentId, state) <- findUpdateHint transaction dbRecord
-      run con "INSERT INTO temp.contributions_to_fix (contribution_id, payment_id, pagarme_state) VALUES (?, ?, ?)" (map toSql [contributionId, paymentId, state])
+      (contributionId, paymentId, state, key, value, payer_email) <- findUpdateHint transaction dbRecord
+      print [contributionId, paymentId, state, key, value, payer_email]
+      run con "INSERT INTO temp.contributions_to_fix (contribution_id, payment_id, pagarme_state, key, value, payer_email) VALUES (?, ?, ?, ?, ?, ?)" [contributionId, paymentId, state, key, value, payer_email]
       commit con
 
     resolveConflicts :: Object -> Maybe DbResult -> IO ()
