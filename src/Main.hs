@@ -6,6 +6,7 @@ import Network.Pagarme
 import Network.Wreq
 import Data.HashMap.Strict ((!), member)
 import qualified Data.Map as M
+import Data.Maybe (isJust)
 
 import Database.HDBC 
 import Database.HDBC.SqlValue
@@ -44,6 +45,7 @@ equivalentPagarmeState :: String -> String
 equivalentPagarmeState dbState 
   | dbState == "confirmed" || dbState == "requested_refund" = "paid" 
   | dbState == "refunded" || dbState == "refunded_and_canceled" = "refunded" 
+  | dbState == "canceled" || dbState == "deleted" = "refused" 
   | otherwise = "waiting_payment"
 
 shouldUpdateDb transaction Nothing = pagarmeState /= "waiting_payment"
@@ -58,8 +60,15 @@ main = do
   select <- prepare con "SELECT * FROM contributions WHERE payment_id = ?;"
   selectByKey <- prepare con "SELECT * FROM contributions WHERE key = ?;"
   selectByCustomer <- prepare con "SELECT * FROM contributions WHERE value::int = ? AND payer_email = ?;"
+  selectExisting <- prepare con "SELECT * FROM temp.contributions_to_fix WHERE payment_id = ?;"
 
   let 
+    transactionAlreadyExists transaction = do
+      _ <- execute select [jsonToSql (transaction ! "id")]
+      result <- fetchRowMap select
+      return $ isJust result
+
+
     valueToSql transaction = nToSql v
       where
         Number value = transaction ! "amount"
@@ -112,8 +121,9 @@ main = do
       commit con
 
     resolveConflicts :: Object -> Maybe DbResult -> IO ()
-    resolveConflicts transaction dbRecord =
-      if shouldUpdateDb transaction dbRecord
+    resolveConflicts transaction dbRecord = do
+      alreadyExists <- transactionAlreadyExists transaction
+      if shouldUpdateDb transaction dbRecord && not alreadyExists
          then insertUpdateHint transaction dbRecord
          else putStrLn "LGTM"
 
